@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Build products
+build/
+dist/
+*.dmg
+
+# Swift and Xcode local state
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Editors
+.idea/
+.vscode/
