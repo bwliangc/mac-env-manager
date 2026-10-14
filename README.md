@@ -1,12 +1,13 @@
 # MacEnvManager
 
-MacEnvManager 是一个原生 macOS 环境变量管理器。它用统一界面管理终端变量、`PATH` 和当前 GUI 登录会话变量，不需要手动选择 Bash 或 Zsh 配置文件。
+MacEnvManager 是一个原生 macOS 环境变量管理器。添加一次变量，即可同步到 Bash、Zsh、sh、dash、ksh、csh、tcsh 和当前 GUI 登录会话，不需要选择或切换终端类型。
 
 ## 功能
 
-- 同时支持 Bash 与 Zsh，包括登录 Shell 和交互式 Shell
-- 管理普通环境变量以及 `PATH` 条目顺序
-- 通过 `launchctl` 管理当前 GUI 登录会话变量
+- 普通变量同时应用到七种 Shell 和当前 GUI 登录会话
+- 系统 Bash 和 Homebrew Bash 共用用户配置
+- 自动接入登录和交互式启动文件，启动应用时修复缺失的加载区块
+- 单独管理七种 Shell 的 `PATH` 条目顺序，避免干扰 macOS 图形应用
 - 修改配置前自动备份，最多保留 40 份
 - 默认隐藏变量值
 - 只修改当前用户配置，不写入 `/etc`，不请求管理员权限
@@ -15,27 +16,37 @@ MacEnvManager 是一个原生 macOS 环境变量管理器。它用统一界面�
 
 - macOS 13 或更高版本
 - Apple Silicon 或 Intel Mac
-- Bash 或 Zsh
+- Bash、Zsh、sh、dash、ksh、csh 或 tcsh
 
-Terminal、iTerm2、Warp 和 VS Code 集成终端等终端应用都可使用，只要其中运行的是 Bash 或 Zsh。当前版本不管理 Fish、Csh 等其他 Shell。
+Terminal、iTerm2、Warp 和 VS Code 集成终端等终端应用无需分别维护变量，使用以上 Shell 即可。Fish、Nushell 等其他 Shell 尚未适配。
 
 ## 安装
 
-1. 打开 `MacEnvManager-1.1.0-universal.dmg`。
+1. 打开 `MacEnvManager-1.3.0-universal.dmg`。
 2. 将 `MacEnvManager.app` 拖入 `Applications`。
 3. 启动“环境变量管理器”。
 
+升级后首次启动会自动迁移已保存的变量并接入全部支持的 Shell，不需要重新添加变量。
+
 ## 使用
 
-### 终端变量
+### 环境变量
 
-在“终端变量”页面添加或编辑变量。保存后，所有新打开的 Bash 与 Zsh 终端都会加载该变量。
+在“环境变量”页面新增、编辑或删除变量。每次保存都会同时更新七种 Shell 的持久配置和当前用户的 `launchctl` 环境，无需选择 Shell。改名会移除旧变量名；保存前检查所有受管配置，写入失败时恢复原文件和 GUI 变量。
 
-已经打开的终端不会被其他进程直接修改。重新打开终端即可生效，也可以在当前终端执行：
+已经运行的终端和 GUI 应用无法被其他进程直接修改。安装或更新后，退出并重新启动终端应用（包括 VS Code），以继承新的变量和启动入口。也可以在当前 Bash/Zsh/sh/dash/ksh 终端执行：
 
 ```bash
-source "$HOME/Library/Application Support/MacEnvManager/environment.zsh"
+. "$HOME/Library/Application Support/MacEnvManager/environment.zsh"
 ```
+
+csh/tcsh 使用：
+
+```csh
+source "$HOME/Library/Application Support/MacEnvManager/environment.csh"
+```
+
+手动加载可更新现有变量；删除或改名后，应重新打开 Shell 来清除旧进程里已经继承的旧变量。
 
 检查变量是否存在时，应使用应用中完全相同的变量名。例如：
 
@@ -49,21 +60,25 @@ fi
 
 ### PATH
 
-在“PATH”页面添加目录，并用上下箭头调整优先级。列表顶部的目录会出现在最终 `PATH` 的最前面；重复目录不会再次加入。
-
-### GUI 会话
-
-“GUI 会话”页面通过 `launchctl setenv` 修改当前登录会话。此类变量不会持久化到下次登录，并且通常只对修改后启动的 GUI 应用有效。
+在“PATH”页面添加目录，并用上下箭头调整优先级。列表顶部的目录会出现在最终 `PATH` 的最前面；重复加载会重新排列受管目录并去重。`PATH` 写入七种 Shell，不注入 GUI 会话。
 
 ## Shell 接入规则
 
-应用维护一份 Bash/Zsh 均可读取的环境文件，并在下列启动文件中加入带明确标记的加载区块：
+应用维护一份 POSIX 兼容环境文件，以及一份使用 `setenv` 的 C-shell 环境文件。以下配置自动加入带明确标记的加载区块：
 
-- Zsh：`.zshrc`、`.zprofile`
-- Bash 交互 Shell：`.bashrc`
-- Bash 登录 Shell：依次选择已存在的 `.bash_profile`、`.bash_login`、`.profile`；都不存在时创建 `.bash_profile`
+| Shell | 接入位置 |
+|---|---|
+| Zsh | `.zshenv`、`.zprofile`、`.zshrc`、`.zlogin` |
+| Bash（系统版及 Homebrew 版） | `.bashrc`；登录时使用已存在的 `.bash_profile`、`.bash_login`、`.profile` 中优先级最高的一份 |
+| sh、dash | `.profile`；交互式会话通过 `ENV` 加载 `posix-init.sh`，保留已有 `.shrc` 内容 |
+| ksh | `.profile`、`.kshrc`；交互式会话也接入 `ENV` |
+| csh、tcsh | `.cshrc`、`.login`；已有 `.tcshrc` 时同步接入，未存在时不创建，以免遮蔽 `.cshrc` |
 
-应用不会覆盖启动文件中的其他内容。切换接入位置或升级配置时，非受管内容会被保留。
+即使 Bash 使用 `.bash_profile`，应用也会独立接入 `.profile`，供 sh/dash/ksh 使用。启动文件中的其他内容和权限会保留。
+
+`ENV` 是 sh/dash/ksh 的交互式启动入口。应用将它指向受管桥接文件；已有 `ENV` 文件路径保存在 `_MAC_ENV_MANAGER_ORIGINAL_ENV`，先加载原文件，再加载统一变量。该入口从 Shell 配置与当前 GUI 会话同时传递给新启动的子进程。
+
+每次启动应用都会修复受管加载区块，并把已保存的变量重新同步到当前 GUI 登录会话。非交互式脚本一般继承父进程环境；主动清空环境（例如 `env -i`）、使用 `--norc`/`-f` 禁用启动配置或自定义 `ZDOTDIR` 的进程不保证自动加载。应用不接管 Docker、远程 SSH 主机或系统守护进程。
 
 ## 数据与安全
 
@@ -71,9 +86,13 @@ fi
 
 - 状态：`~/Library/Application Support/MacEnvManager/state.json`
 - 环境文件：`~/Library/Application Support/MacEnvManager/environment.zsh`
+- C-shell 环境文件：`~/Library/Application Support/MacEnvManager/environment.csh`
+- POSIX 交互式启动桥接：`~/Library/Application Support/MacEnvManager/posix-init.sh`
 - 备份：`~/Library/Application Support/MacEnvManager/Backups`
 
-状态、环境文件和备份使用 `0600` 权限，仅当前用户可读写。持久终端变量仍以明文存储；环境变量中的令牌或密钥也会传递给终端启动的子进程。GUI 会话变量的值不写入应用状态，但会由当前用户的 `launchd` 会话持有直到注销。
+状态、环境文件和备份使用 `0600` 权限，仅当前用户可读写。变量值仍以明文存储；环境变量中的令牌或密钥会传递给新启动的终端、GUI 应用及其子进程。当前 GUI 会话中的值会在注销时消失，并在下次打开 MacEnvManager 时从已保存状态重新同步。
+
+C-shell 文件为安全处理引号、`!` 等字符使用 Base64 编码变量值，编码不提供加密保护。`ENV`、`BASH_ENV` 和 `_MAC_ENV_MANAGER_` 前缀由加载机制管理，不能作为普通变量覆盖。
 
 ## 构建与测试
 
@@ -91,7 +110,7 @@ fi
 ./Scripts/build_dmg.sh
 ```
 
-输出文件位于 `dist/MacEnvManager-1.1.0-universal.dmg`。本地构建采用 ad-hoc 签名；公开分发需要 Apple Developer ID 签名和公证。
+输出文件位于 `dist/MacEnvManager-1.3.0-universal.dmg`。本地构建采用 ad-hoc 签名；公开分发需要 Apple Developer ID 签名和公证。
 
 ## 项目结构
 

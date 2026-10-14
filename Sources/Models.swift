@@ -1,25 +1,22 @@
 import Foundation
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case shell
+    case variables
     case path
-    case session
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .shell: return "终端变量"
+        case .variables: return "环境变量"
         case .path: return "PATH"
-        case .session: return "GUI 会话"
         }
     }
 
     var systemImage: String {
         switch self {
-        case .shell: return "terminal"
+        case .variables: return "terminal"
         case .path: return "point.3.connected.trianglepath.dotted"
-        case .session: return "macwindow"
         }
     }
 }
@@ -47,16 +44,18 @@ struct PathEntry: Codable, Identifiable, Equatable {
 }
 
 struct StoredState: Codable, Equatable {
+    static let currentVersion = 5
+
     var version: Int
     var variables: [ManagedVariable]
     var pathEntries: [PathEntry]
-    var sessionNames: [String]
+    var legacySessionNames: [String]
 
     static let empty = StoredState(
-        version: 3,
+        version: currentVersion,
         variables: [],
         pathEntries: [],
-        sessionNames: []
+        legacySessionNames: []
     )
 
     private enum CodingKeys: String, CodingKey {
@@ -67,12 +66,12 @@ struct StoredState: Codable, Equatable {
         version: Int,
         variables: [ManagedVariable],
         pathEntries: [PathEntry],
-        sessionNames: [String]
+        legacySessionNames: [String] = []
     ) {
         self.version = version
         self.variables = variables
         self.pathEntries = pathEntries
-        self.sessionNames = sessionNames
+        self.legacySessionNames = legacySessionNames
     }
 
     init(from decoder: Decoder) throws {
@@ -80,14 +79,15 @@ struct StoredState: Codable, Equatable {
         version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
         variables = try container.decodeIfPresent([ManagedVariable].self, forKey: .variables) ?? []
         pathEntries = try container.decodeIfPresent([PathEntry].self, forKey: .pathEntries) ?? []
-        sessionNames = try container.decodeIfPresent([String].self, forKey: .sessionNames) ?? []
+        legacySessionNames = try container.decodeIfPresent([String].self, forKey: .sessionNames) ?? []
     }
-}
 
-struct SessionVariable: Identifiable, Equatable {
-    var id: String { name }
-    let name: String
-    let value: String?
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(variables, forKey: .variables)
+        try container.encode(pathEntries, forKey: .pathEntries)
+    }
 }
 
 struct BackupRecord: Identifiable {
@@ -104,7 +104,6 @@ enum EnvironmentManagerError: LocalizedError {
     case protectedName(String)
     case duplicateName(String)
     case invalidValue
-    case emptySessionValue
     case invalidPath
     case duplicatePath(String)
     case malformedProfile(String)
@@ -121,8 +120,6 @@ enum EnvironmentManagerError: LocalizedError {
             return "变量 \(name) 已存在。"
         case .invalidValue:
             return "变量值不能包含换行符或空字符。"
-        case .emptySessionValue:
-            return "GUI 会话变量的值不能为空。"
         case .invalidPath:
             return "PATH 条目不能为空，也不能包含冒号、换行符或空字符。"
         case .duplicatePath(let path):

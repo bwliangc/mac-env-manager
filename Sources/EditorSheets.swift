@@ -6,11 +6,6 @@ struct VariableEditorContext: Identifiable {
     let variable: ManagedVariable?
 }
 
-struct SessionEditorContext: Identifiable {
-    let id = UUID()
-    let variable: SessionVariable?
-}
-
 struct VariableEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @FocusState private var focusedField: Field?
@@ -18,8 +13,6 @@ struct VariableEditorSheet: View {
     let title: String
     let initialName: String
     let initialValue: String
-    let locksName: Bool
-    let storesPlaintext: Bool
     let onSave: (String, String) throws -> Void
 
     @State private var name: String
@@ -36,15 +29,11 @@ struct VariableEditorSheet: View {
         title: String,
         initialName: String = "",
         initialValue: String = "",
-        locksName: Bool = false,
-        storesPlaintext: Bool,
         onSave: @escaping (String, String) throws -> Void
     ) {
         self.title = title
         self.initialName = initialName
         self.initialValue = initialValue
-        self.locksName = locksName
-        self.storesPlaintext = storesPlaintext
         self.onSave = onSave
         _name = State(initialValue: initialName)
         _value = State(initialValue: initialValue)
@@ -71,7 +60,6 @@ struct VariableEditorSheet: View {
                 TextField("变量名", text: $name)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.body, design: .monospaced))
-                    .disabled(locksName)
                     .focused($focusedField, equals: .name)
 
                 HStack(spacing: 8) {
@@ -96,7 +84,7 @@ struct VariableEditorSheet: View {
                     .help(revealsValue ? "隐藏变量值" : "显示变量值")
                 }
 
-                if storesPlaintext && looksSensitive {
+                if looksSensitive {
                     Label("该值会以仅当前用户可读的明文保存", systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -124,9 +112,9 @@ struct VariableEditorSheet: View {
             }
             .padding(16)
         }
-        .frame(width: 460, height: storesPlaintext && looksSensitive ? 310 : 280)
+        .frame(width: 460, height: looksSensitive ? 310 : 280)
         .onAppear {
-            focusedField = locksName ? .value : .name
+            focusedField = .name
         }
     }
 

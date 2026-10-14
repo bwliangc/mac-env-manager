@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var store: EnvironmentStore
-    @State private var selectedSection: AppSection? = .shell
+    @State private var selectedSection: AppSection? = .variables
 
     var body: some View {
         VStack(spacing: 0) {
@@ -13,13 +13,11 @@ struct ContentView: View {
                 }
                 .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 230)
             } detail: {
-                switch selectedSection ?? .shell {
-                case .shell:
-                    ShellVariablesView()
+                switch selectedSection ?? .variables {
+                case .variables:
+                    EnvironmentVariablesView()
                 case .path:
                     PathEntriesView()
-                case .session:
-                    SessionVariablesView()
                 }
             }
 
@@ -112,7 +110,7 @@ private struct IconButton: View {
     }
 }
 
-struct ShellVariablesView: View {
+struct EnvironmentVariablesView: View {
     @EnvironmentObject private var store: EnvironmentStore
     @State private var selectedID: UUID?
     @State private var editor: VariableEditorContext?
@@ -125,7 +123,7 @@ struct ShellVariablesView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            DetailHeader(title: "终端变量", subtitle: "Bash 与 Zsh · 新终端生效") {
+            DetailHeader(title: "环境变量", subtitle: "7 种 Shell 与当前 GUI 会话 · 自动同步") {
                 HStack(spacing: 10) {
                     IconButton(
                         systemImage: revealsValues ? "eye.slash" : "eye",
@@ -181,16 +179,15 @@ struct ShellVariablesView: View {
                 .listStyle(.inset)
 
                 if store.variables.isEmpty {
-                    EmptyListState(title: "暂无终端变量", systemImage: "terminal")
+                    EmptyListState(title: "暂无环境变量", systemImage: "terminal")
                 }
             }
         }
         .sheet(item: $editor) { context in
             VariableEditorSheet(
-                title: context.variable == nil ? "添加终端变量" : "编辑终端变量",
+                title: context.variable == nil ? "添加环境变量" : "编辑环境变量",
                 initialName: context.variable?.name ?? "",
-                initialValue: context.variable?.value ?? "",
-                storesPlaintext: true
+                initialValue: context.variable?.value ?? ""
             ) { name, value in
                 try store.upsertVariable(id: context.variable?.id, name: name, value: value)
             }
@@ -228,7 +225,7 @@ struct PathEntriesView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            DetailHeader(title: "PATH", subtitle: "Bash 与 Zsh · 优先级从上到下") {
+            DetailHeader(title: "PATH", subtitle: "7 种 Shell · 优先级从上到下") {
                 HStack(spacing: 10) {
                     IconButton(systemImage: "plus", help: "添加目录") { showsEditor = true }
                     IconButton(
@@ -318,113 +315,6 @@ struct PathEntriesView: View {
             try store.movePath(id: selectedID, offset: offset)
         } catch {
             store.present(error)
-        }
-    }
-}
-
-struct SessionVariablesView: View {
-    @EnvironmentObject private var store: EnvironmentStore
-    @State private var selectedName: String?
-    @State private var editor: SessionEditorContext?
-    @State private var revealsValues = false
-    @State private var confirmsDelete = false
-
-    private var selectedVariable: SessionVariable? {
-        store.sessionVariables.first { $0.name == selectedName }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            DetailHeader(title: "GUI 会话", subtitle: "当前登录会话 · launchctl") {
-                HStack(spacing: 10) {
-                    IconButton(systemImage: "arrow.clockwise", help: "刷新") {
-                        store.refreshSessionVariables()
-                    }
-                    IconButton(
-                        systemImage: revealsValues ? "eye.slash" : "eye",
-                        help: revealsValues ? "隐藏变量值" : "显示变量值"
-                    ) {
-                        revealsValues.toggle()
-                    }
-                    IconButton(systemImage: "plus", help: "添加会话变量") {
-                        editor = SessionEditorContext(variable: nil)
-                    }
-                    IconButton(systemImage: "pencil", help: "编辑会话变量", disabled: selectedVariable == nil) {
-                        if let selectedVariable {
-                            editor = SessionEditorContext(variable: selectedVariable)
-                        }
-                    }
-                    IconButton(systemImage: "trash", help: "移除会话变量", disabled: selectedVariable == nil) {
-                        confirmsDelete = true
-                    }
-                }
-            }
-
-            Divider()
-            columnHeader(name: "变量名", value: "变量值")
-            Divider()
-
-            ZStack {
-                List(store.sessionVariables, selection: $selectedName) { variable in
-                    HStack(spacing: 16) {
-                        Text(variable.name)
-                            .font(.system(.body, design: .monospaced).weight(.medium))
-                            .frame(width: 230, alignment: .leading)
-                        if let value = variable.value {
-                            Text(revealsValues ? value : maskedValue(value))
-                                .font(.system(.body, design: .monospaced))
-                                .foregroundStyle(revealsValues ? .primary : .secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        } else {
-                            Label("未设置", systemImage: "circle.dashed")
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .contentShape(Rectangle())
-                    .tag(variable.name)
-                    .contextMenu {
-                        Button("编辑") { editor = SessionEditorContext(variable: variable) }
-                        Button("移除", role: .destructive) {
-                            selectedName = variable.name
-                            confirmsDelete = true
-                        }
-                    }
-                    .onTapGesture(count: 2) {
-                        selectedName = variable.name
-                        editor = SessionEditorContext(variable: variable)
-                    }
-                }
-                .listStyle(.inset)
-
-                if store.sessionVariables.isEmpty {
-                    EmptyListState(title: "暂无 GUI 会话变量", systemImage: "macwindow")
-                }
-            }
-        }
-        .sheet(item: $editor) { context in
-            VariableEditorSheet(
-                title: context.variable == nil ? "添加会话变量" : "编辑会话变量",
-                initialName: context.variable?.name ?? "",
-                initialValue: context.variable?.value ?? "",
-                locksName: context.variable != nil,
-                storesPlaintext: false
-            ) { name, value in
-                try store.setSessionVariable(name: name, value: value)
-            }
-        }
-        .confirmationDialog("从当前会话移除所选变量？", isPresented: $confirmsDelete) {
-            Button("移除", role: .destructive) {
-                guard let name = selectedName else { return }
-                do {
-                    try store.removeSessionVariable(name: name)
-                    selectedName = nil
-                } catch {
-                    store.present(error)
-                }
-            }
-            Button("取消", role: .cancel) {}
         }
     }
 }

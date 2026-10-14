@@ -7,6 +7,8 @@ private struct StorageLocations {
     let appSupport: URL
     let state: URL
     let environment: URL
+    let cshEnvironment: URL
+    let posixStartup: URL
     let backups: URL
 
     init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
@@ -17,6 +19,8 @@ private struct StorageLocations {
             .appendingPathComponent("MacEnvManager", isDirectory: true)
         state = appSupport.appendingPathComponent("state.json")
         environment = appSupport.appendingPathComponent("environment.zsh")
+        cshEnvironment = appSupport.appendingPathComponent("environment.csh")
+        posixStartup = appSupport.appendingPathComponent("posix-init.sh")
         backups = appSupport.appendingPathComponent("Backups", isDirectory: true)
     }
 
@@ -53,40 +57,80 @@ private final class FilePersistence {
     func save(_ newState: StoredState) throws {
         do {
             try ensureDirectories()
-            try backupIfPresent(locations.state, label: "state.json")
-            try backupIfPresent(locations.environment, label: "environment.zsh")
-
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-            let data = try encoder.encode(newState)
-            try writeSecure(data, to: locations.state)
-
-            let environmentText = ShellConfiguration.renderEnvironmentFile(
-                variables: newState.variables,
-                pathEntries: newState.pathEntries
-            )
-            try writeSecure(Data(environmentText.utf8), to: locations.environment)
-
+            var writes: [(URL, Data)] = [
+                (locations.state, try encoder.encode(newState)),
+                (locations.environment, Data(ShellConfiguration.renderEnvironmentFile(
+                    variables: newState.variables, pathEntries: newState.pathEntries
+                ).utf8)),
+                (locations.cshEnvironment, Data(ShellConfiguration.renderCshEnvironmentFile(
+                    variables: newState.variables, pathEntries: newState.pathEntries
+                ).utf8)),
+                (locations.posixStartup, Data(ShellConfiguration.posixStartupFile.utf8))
+            ]
             let profileFilenames = managedProfileFilenames()
-            try installProfiles(profileFilenames)
-            try removeManagedBlocks(except: Set(profileFilenames))
-
-            try pruneBackups(keeping: 40)
-        } catch let error as EnvironmentManagerError {
-            throw error
-        } catch {
-            throw EnvironmentManagerError.storage(error.localizedDescription)
-        }
-    }
-
-    func saveStateOnly(_ newState: StoredState) throws {
-        do {
-            try ensureDirectories()
-            try backupIfPresent(locations.state, label: "state.json")
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-            try writeSecure(encoder.encode(newState), to: locations.state)
-            try pruneBackups(keeping: 40)
+            for filename in profileFilenames {
+                let url = locations.profile(filename)
+                let original = try readProfile(filename)
+                let updated = try ShellConfiguration.installManagedBlock(in: original, filename: filename)
+                writes.append((url, Data(updated.utf8)))
+            }
+            // Bash ignores lower-priority login files, but .profile is always
+            // needed by sh/dash/ksh even when Bash uses .bash_profile.
+            for filename in [".bash_profile", ".bash_login"] where !profileFilenames.contains(filename) {
+                let url = locations.profile(filename)
+                guard fileManager.fileExists(atPath: url.path) else { continue }
+                let original = try readProfile(filename)
+                guard original.contains(ShellConfiguration.markerStart) || original.contains(ShellConfiguration.markerEnd) else { continue }
+                let cleaned = try ShellConfiguration.removeManagedBlock(from: original, filename: filename)
+                writes.append((url, Data((cleaned.isEmpty ? "" : cleaned + "\n").utf8)))
+            }
+            // Validate and snapshot every file before the first write so failures
+            // cannot leave different shells with different sets of variables.
+            var changes: [(url: URL, data: Data, original: Data?, permissions: NSNumber, originalPermissions: NSNumber)] = []
+            for (url, data) in writes {
+                let original = fileManager.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil
+                let isProfile = url.deletingLastPathComponent() == locations.home
+                let originalPermissions = (try? fileManager.attributesOfItem(atPath: url.path)[.posixPermissions]) as? NSNumber
+                let permissions = isProfile
+                    ? (originalPermissions ?? NSNumber(value: 0o600))
+                    : NSNumber(value: 0o600)
+                if original != data || originalPermissions?.intValue != permissions.intValue {
+                    changes.append((url, data, original, permissions, originalPermissions ?? permissions))
+                }
+            }
+            for change in changes {
+                try backupIfPresent(change.url, label: change.url.lastPathComponent)
+            }
+            var attempted: [Int] = []
+            do {
+                for (index, change) in changes.enumerated() {
+                    attempted.append(index)
+                    try change.data.write(to: change.url, options: .atomic)
+                    try fileManager.setAttributes([.posixPermissions: change.permissions], ofItemAtPath: change.url.path)
+                }
+            } catch {
+                var rollbackFailed = false
+                for index in attempted.reversed() {
+                    let change = changes[index]
+                    do {
+                        if let original = change.original {
+                            try original.write(to: change.url, options: .atomic)
+                            try fileManager.setAttributes([.posixPermissions: change.originalPermissions], ofItemAtPath: change.url.path)
+                        } else if fileManager.fileExists(atPath: change.url.path) {
+                            try fileManager.removeItem(at: change.url)
+                        }
+                    } catch {
+                        rollbackFailed = true
+                    }
+                }
+                if rollbackFailed {
+                    throw EnvironmentManagerError.storage("写入和恢复均失败，请从 Backups 文件夹恢复配置。")
+                }
+                throw error
+            }
+            try? pruneBackups(keeping: 40)
         } catch let error as EnvironmentManagerError {
             throw error
         } catch {
@@ -136,15 +180,10 @@ private final class FilePersistence {
         try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locations.backups.path)
     }
 
-    private func installProfiles(_ filenames: [String]) throws {
-        for filename in filenames {
-            let url = locations.profile(filename)
-            let original = profileText(filename)
-            let updated = try ShellConfiguration.installManagedBlock(in: original, filename: filename)
-            guard updated != original else { continue }
-            try backupIfPresent(url, label: filename)
-            try writeProfile(updated, to: url)
-        }
+    private func readProfile(_ filename: String) throws -> String {
+        let url = locations.profile(filename)
+        guard fileManager.fileExists(atPath: url.path) else { return "" }
+        return try String(contentsOf: url, encoding: .utf8)
     }
 
     private func managedProfileFilenames() -> [String] {
@@ -153,42 +192,13 @@ private final class FilePersistence {
             fileManager.fileExists(atPath: locations.profile($0).path)
         } ?? ".bash_profile"
 
-        return [".zshrc", ".zprofile", ".bashrc", bashLogin]
-    }
-
-    private func removeManagedBlocks(except filenamesToKeep: Set<String>) throws {
-        let knownProfiles = [".zshrc", ".zprofile", ".bashrc", ".bash_profile", ".bash_login", ".profile"]
-        for filename in knownProfiles where !filenamesToKeep.contains(filename) {
-            let url = locations.profile(filename)
-            guard fileManager.fileExists(atPath: url.path) else { continue }
-            let original = profileText(filename)
-            guard original.contains(ShellConfiguration.markerStart) || original.contains(ShellConfiguration.markerEnd) else {
-                continue
-            }
-            let updated = try ShellConfiguration.removeManagedBlock(from: original, filename: filename)
-            guard updated != original.trimmingCharacters(in: .newlines) else { continue }
-            try backupIfPresent(url, label: filename)
-            let text = updated.isEmpty ? "" : updated + "\n"
-            try writeProfile(text, to: url)
+        var filenames = [".zshenv", ".zshrc", ".zprofile", ".zlogin", ".bashrc", ".profile", ".shrc", ".kshrc", ".cshrc", ".login"]
+        if !filenames.contains(bashLogin) { filenames.append(bashLogin) }
+        // Do not create .tcshrc if absent: it would mask an existing .cshrc.
+        if fileManager.fileExists(atPath: locations.profile(".tcshrc").path) {
+            filenames.append(".tcshrc")
         }
-    }
-
-    func migrateToAllShells(_ newState: StoredState) throws {
-        try save(newState)
-    }
-
-    private func writeProfile(_ text: String, to url: URL) throws {
-        let existingPermissions = (try? fileManager.attributesOfItem(atPath: url.path)[.posixPermissions]) as? NSNumber
-        try Data(text.utf8).write(to: url, options: .atomic)
-        try fileManager.setAttributes(
-            [.posixPermissions: existingPermissions ?? NSNumber(value: 0o600)],
-            ofItemAtPath: url.path
-        )
-    }
-
-    private func writeSecure(_ data: Data, to url: URL) throws {
-        try data.write(to: url, options: .atomic)
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        return filenames
     }
 
     private func backupIfPresent(_ url: URL, label: String) throws {
@@ -212,7 +222,13 @@ private final class FilePersistence {
     }
 }
 
-private struct LaunchctlClient {
+protocol LaunchctlManaging {
+    func value(for name: String) throws -> String?
+    func set(name: String, value: String) throws
+    func unset(name: String) throws
+}
+
+struct SystemLaunchctlClient: LaunchctlManaging {
     func value(for name: String) throws -> String? {
         let result = try run(["getenv", name])
         guard result.status == 0 else { return nil }
@@ -262,31 +278,44 @@ private struct LaunchctlClient {
 @MainActor
 final class EnvironmentStore: ObservableObject {
     @Published private(set) var state: StoredState = .empty
-    @Published private(set) var sessionVariables: [SessionVariable] = []
     @Published private(set) var backups: [BackupRecord] = []
     @Published var statusMessage = "就绪"
     @Published var errorMessage: String?
 
     private let persistence: FilePersistence
-    private let launchctl = LaunchctlClient()
+    private let launchctl: any LaunchctlManaging
 
-    init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
-        persistence = FilePersistence(home: home)
+    init(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        launchctl: any LaunchctlManaging = SystemLaunchctlClient(),
+        fileManager: FileManager = .default
+    ) {
+        persistence = FilePersistence(home: home, fileManager: fileManager)
+        self.launchctl = launchctl
         do {
             let hadStoredState = persistence.hasStoredState
             var loadedState = try persistence.load()
-
-            if hadStoredState, loadedState.version < 3 {
-                loadedState.version = 3
-                try persistence.migrateToAllShells(loadedState)
-                statusMessage = "已应用到 Bash 与 Zsh；新终端会话生效"
-            }
             state = loadedState
             try persistence.ensureDirectories()
+
+            let requiresMigration = hadStoredState && loadedState.version < StoredState.currentVersion
+            if requiresMigration {
+                mergeLegacySessionVariables(into: &loadedState)
+                loadedState.version = StoredState.currentVersion
+                loadedState.legacySessionNames = []
+            }
+            try persistence.save(loadedState)
+            state = loadedState
+            try synchronizeGUIEnvironment()
+            try synchronizePOSIXStartup()
+            if requiresMigration {
+                statusMessage = "已升级并同步到 7 种 Shell 与当前 GUI 会话"
+            } else if !state.variables.isEmpty {
+                statusMessage = "已同步到 7 种 Shell 与当前 GUI 会话"
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
-        refreshSessionVariables()
         refreshBackups()
     }
 
@@ -306,10 +335,12 @@ final class EnvironmentStore: ObservableObject {
         try ShellConfiguration.validateVariable(name: name, value: value)
 
         var next = state
+        var originalVariable: ManagedVariable?
         if let id, let index = next.variables.firstIndex(where: { $0.id == id }) {
             if next.variables.contains(where: { $0.id != id && $0.name == name }) {
                 throw EnvironmentManagerError.duplicateName(name)
             }
+            originalVariable = next.variables[index]
             next.variables[index].name = name
             next.variables[index].value = value
         } else {
@@ -319,18 +350,69 @@ final class EnvironmentStore: ObservableObject {
             next.variables.append(ManagedVariable(name: name, value: value))
         }
 
-        try commit(next)
+        let renamedFrom = originalVariable?.name == name ? nil : originalVariable?.name
+        let previousNewValue = try launchctl.value(for: name)
+        let previousOldValue: String?
+        if let renamedFrom {
+            previousOldValue = try launchctl.value(for: renamedFrom)
+        } else {
+            previousOldValue = nil
+        }
+
+        do {
+            try launchctl.set(name: name, value: value)
+            if let renamedFrom {
+                try launchctl.unset(name: renamedFrom)
+            }
+        } catch {
+            restoreLaunchctl(name: name, value: previousNewValue)
+            if let renamedFrom {
+                restoreLaunchctl(name: renamedFrom, value: previousOldValue)
+            }
+            throw error
+        }
+
+        do {
+            try persistence.save(next)
+            state = next
+            refreshBackups()
+        } catch {
+            restoreLaunchctl(name: name, value: previousNewValue)
+            if let renamedFrom {
+                restoreLaunchctl(name: renamedFrom, value: previousOldValue)
+            }
+            refreshBackups()
+            throw error
+        }
+
         let conflicts = persistence.unmanagedDefinitionLocations(for: name)
         statusMessage = conflicts.isEmpty
-            ? "已保存；新终端会话生效"
-            : "已保存；\(conflicts.joined(separator: ", ")) 存在同名定义"
+            ? "已保存到所有环境；新启动的终端和应用生效"
+            : "已保存到所有环境；\(conflicts.joined(separator: ", ")) 存在同名定义"
     }
 
     func removeVariable(id: UUID) throws {
+        guard let variable = state.variables.first(where: { $0.id == id }) else { return }
         var next = state
         next.variables.removeAll { $0.id == id }
-        try commit(next)
-        statusMessage = "已删除；新终端会话生效"
+        let previousValue = try launchctl.value(for: variable.name)
+        do {
+            try launchctl.unset(name: variable.name)
+        } catch {
+            restoreLaunchctl(name: variable.name, value: previousValue)
+            throw error
+        }
+
+        do {
+            try persistence.save(next)
+            state = next
+            refreshBackups()
+        } catch {
+            restoreLaunchctl(name: variable.name, value: previousValue)
+            refreshBackups()
+            throw error
+        }
+        statusMessage = "已从所有环境删除；新启动的终端和应用生效"
     }
 
     func addPath(_ rawPath: String) throws {
@@ -361,63 +443,6 @@ final class EnvironmentStore: ObservableObject {
         statusMessage = "PATH 顺序已更新"
     }
 
-    func setSessionVariable(name rawName: String, value: String) throws {
-        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-        try ShellConfiguration.validateVariable(name: name, value: value)
-        guard !value.isEmpty else {
-            throw EnvironmentManagerError.emptySessionValue
-        }
-        let previous = try launchctl.value(for: name)
-        try launchctl.set(name: name, value: value)
-
-        var next = state
-        if !next.sessionNames.contains(name) {
-            next.sessionNames.append(name)
-            next.sessionNames.sort()
-        }
-
-        do {
-            try persistence.saveStateOnly(next)
-            state = next
-        } catch {
-            if let previous {
-                try? launchctl.set(name: name, value: previous)
-            } else {
-                try? launchctl.unset(name: name)
-            }
-            throw error
-        }
-
-        refreshSessionVariables()
-        refreshBackups()
-        statusMessage = "已应用到当前 GUI 登录会话"
-    }
-
-    func removeSessionVariable(name: String) throws {
-        let previous = try launchctl.value(for: name)
-        try launchctl.unset(name: name)
-        var next = state
-        next.sessionNames.removeAll { $0 == name }
-        do {
-            try persistence.saveStateOnly(next)
-            state = next
-        } catch {
-            if let previous {
-                try? launchctl.set(name: name, value: previous)
-            }
-            throw error
-        }
-        refreshSessionVariables()
-        refreshBackups()
-        statusMessage = "已从当前 GUI 登录会话移除"
-    }
-
-    func refreshSessionVariables() {
-        sessionVariables = state.sessionNames.sorted().map { name in
-            SessionVariable(name: name, value: try? launchctl.value(for: name))
-        }
-    }
-
     func refreshBackups() {
         backups = persistence.backupRecords()
     }
@@ -435,5 +460,55 @@ final class EnvironmentStore: ObservableObject {
         try persistence.save(next)
         state = next
         refreshBackups()
+    }
+
+    private func mergeLegacySessionVariables(into loadedState: inout StoredState) {
+        var names = Set(loadedState.variables.map(\.name))
+        for name in loadedState.legacySessionNames where !names.contains(name) {
+            let legacyValue: String?
+            do {
+                legacyValue = try launchctl.value(for: name)
+            } catch {
+                continue
+            }
+            guard let legacyValue else { continue }
+            do {
+                try ShellConfiguration.validateVariable(name: name, value: legacyValue)
+            } catch {
+                continue
+            }
+            loadedState.variables.append(ManagedVariable(name: name, value: legacyValue))
+            names.insert(name)
+        }
+    }
+
+    private func synchronizeGUIEnvironment() throws {
+        for variable in state.variables {
+            try launchctl.set(name: variable.name, value: variable.value)
+        }
+    }
+
+    private func synchronizePOSIXStartup() throws {
+        let managedPath = persistence.locations.posixStartup.path
+        let previousENV = try launchctl.value(for: "ENV")
+        let previousOriginal = try launchctl.value(for: "_MAC_ENV_MANAGER_ORIGINAL_ENV")
+        do {
+            if let previousENV, previousENV != managedPath {
+                try launchctl.set(name: "_MAC_ENV_MANAGER_ORIGINAL_ENV", value: previousENV)
+            }
+            try launchctl.set(name: "ENV", value: managedPath)
+        } catch {
+            restoreLaunchctl(name: "ENV", value: previousENV)
+            restoreLaunchctl(name: "_MAC_ENV_MANAGER_ORIGINAL_ENV", value: previousOriginal)
+            throw error
+        }
+    }
+
+    private func restoreLaunchctl(name: String, value: String?) {
+        if let value {
+            try? launchctl.set(name: name, value: value)
+        } else {
+            try? launchctl.unset(name: name)
+        }
     }
 }
