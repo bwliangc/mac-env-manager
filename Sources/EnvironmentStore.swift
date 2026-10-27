@@ -62,10 +62,10 @@ private final class FilePersistence {
             var writes: [(URL, Data)] = [
                 (locations.state, try encoder.encode(newState)),
                 (locations.environment, Data(ShellConfiguration.renderEnvironmentFile(
-                    variables: newState.variables, pathEntries: newState.pathEntries
+                    variables: newState.variables
                 ).utf8)),
                 (locations.cshEnvironment, Data(ShellConfiguration.renderCshEnvironmentFile(
-                    variables: newState.variables, pathEntries: newState.pathEntries
+                    variables: newState.variables
                 ).utf8)),
                 (locations.posixStartup, Data(ShellConfiguration.posixStartupFile.utf8))
             ]
@@ -323,14 +323,13 @@ final class EnvironmentStore: ObservableObject {
         state.variables.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
-    var pathEntries: [PathEntry] { state.pathEntries }
     var backupFolder: URL { persistence.locations.backups }
 
     func present(_ error: Error) {
         errorMessage = error.localizedDescription
     }
 
-    func upsertVariable(id: UUID?, name rawName: String, value: String) throws {
+    func upsertVariable(id: UUID?, name rawName: String, value: String, isEnabled: Bool? = nil) throws {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         try ShellConfiguration.validateVariable(name: name, value: value)
 
@@ -343,13 +342,15 @@ final class EnvironmentStore: ObservableObject {
             originalVariable = next.variables[index]
             next.variables[index].name = name
             next.variables[index].value = value
+            next.variables[index].isEnabled = isEnabled ?? next.variables[index].isEnabled
         } else {
             guard !next.variables.contains(where: { $0.name == name }) else {
                 throw EnvironmentManagerError.duplicateName(name)
             }
-            next.variables.append(ManagedVariable(name: name, value: value))
+            next.variables.append(ManagedVariable(name: name, value: value, isEnabled: isEnabled ?? false))
         }
 
+        let enabled = isEnabled ?? originalVariable?.isEnabled ?? false
         let renamedFrom = originalVariable?.name == name ? nil : originalVariable?.name
         let previousNewValue = try launchctl.value(for: name)
         let previousOldValue: String?
@@ -360,7 +361,11 @@ final class EnvironmentStore: ObservableObject {
         }
 
         do {
-            try launchctl.set(name: name, value: value)
+            if enabled {
+                try launchctl.set(name: name, value: value)
+            } else {
+                try launchctl.unset(name: name)
+            }
             if let renamedFrom {
                 try launchctl.unset(name: renamedFrom)
             }
@@ -385,10 +390,15 @@ final class EnvironmentStore: ObservableObject {
             throw error
         }
 
-        let conflicts = persistence.unmanagedDefinitionLocations(for: name)
+        let conflicts = enabled ? persistence.unmanagedDefinitionLocations(for: name) : []
         statusMessage = conflicts.isEmpty
-            ? "已保存到所有环境；新启动的终端和应用生效"
+            ? (enabled ? "已启用；新启动的终端和应用生效" : "已停用并保留变量；新启动的终端和应用生效")
             : "已保存到所有环境；\(conflicts.joined(separator: ", ")) 存在同名定义"
+    }
+
+    func setVariableEnabled(id: UUID, isEnabled: Bool) throws {
+        guard let variable = state.variables.first(where: { $0.id == id }) else { return }
+        try upsertVariable(id: id, name: variable.name, value: variable.value, isEnabled: isEnabled)
     }
 
     func removeVariable(id: UUID) throws {
@@ -415,34 +425,6 @@ final class EnvironmentStore: ObservableObject {
         statusMessage = "已从所有环境删除；新启动的终端和应用生效"
     }
 
-    func addPath(_ rawPath: String) throws {
-        let path = try ShellConfiguration.normalizePath(rawPath, home: persistence.locations.home)
-        guard !state.pathEntries.contains(where: { $0.path == path }) else {
-            throw EnvironmentManagerError.duplicatePath(path)
-        }
-        var next = state
-        next.pathEntries.append(PathEntry(path: path))
-        try commit(next)
-        statusMessage = "PATH 已更新；新终端会话生效"
-    }
-
-    func removePath(id: UUID) throws {
-        var next = state
-        next.pathEntries.removeAll { $0.id == id }
-        try commit(next)
-        statusMessage = "PATH 已更新；新终端会话生效"
-    }
-
-    func movePath(id: UUID, offset: Int) throws {
-        guard let source = state.pathEntries.firstIndex(where: { $0.id == id }) else { return }
-        let destination = source + offset
-        guard state.pathEntries.indices.contains(destination) else { return }
-        var next = state
-        next.pathEntries.swapAt(source, destination)
-        try commit(next)
-        statusMessage = "PATH 顺序已更新"
-    }
-
     func refreshBackups() {
         backups = persistence.backupRecords()
     }
@@ -454,12 +436,6 @@ final class EnvironmentStore: ObservableObject {
         } catch {
             present(error)
         }
-    }
-
-    private func commit(_ next: StoredState) throws {
-        try persistence.save(next)
-        state = next
-        refreshBackups()
     }
 
     private func mergeLegacySessionVariables(into loadedState: inout StoredState) {
@@ -477,14 +453,18 @@ final class EnvironmentStore: ObservableObject {
             } catch {
                 continue
             }
-            loadedState.variables.append(ManagedVariable(name: name, value: legacyValue))
+            loadedState.variables.append(ManagedVariable(name: name, value: legacyValue, isEnabled: true))
             names.insert(name)
         }
     }
 
     private func synchronizeGUIEnvironment() throws {
         for variable in state.variables {
-            try launchctl.set(name: variable.name, value: variable.value)
+            if variable.isEnabled {
+                try launchctl.set(name: variable.name, value: variable.value)
+            } else {
+                try launchctl.unset(name: variable.name)
+            }
         }
     }
 

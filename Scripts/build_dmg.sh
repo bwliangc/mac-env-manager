@@ -11,7 +11,7 @@ RESOURCES_DIR="$CONTENTS/Resources"
 ICONSET="$BUILD_ROOT/AppIcon.iconset"
 DMG_STAGE="$BUILD_ROOT/dmg-stage"
 DIST_DIR="$PROJECT_ROOT/dist"
-DMG_PATH="$DIST_DIR/MacEnvManager-1.3.0-universal.dmg"
+DMG_PATH="$DIST_DIR/MacEnvManager-1.4.0-universal.dmg"
 COMPATIBLE_SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk"
 
 if [[ -d "$COMPATIBLE_SDK" ]]; then

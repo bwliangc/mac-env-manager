@@ -8,7 +8,7 @@ struct CoreTests {
         try testShellQuotingAndExecution()
         try testManagedProfileBlock()
         try testMalformedProfileProtection()
-        try testPathNormalization()
+        try testVariableDefaultsAndCoding()
         testConflictDetection()
         print("CoreTests passed: \(checks) checks")
     }
@@ -25,14 +25,12 @@ struct CoreTests {
         expect(ShellConfiguration.shellQuote("a'b") == "'a'\\''b'", "single quotes are escaped")
 
         let variables = [
-            ManagedVariable(name: "PLAIN", value: "hello world"),
-            ManagedVariable(name: "QUOTED", value: "a'b")
+            ManagedVariable(name: "PLAIN", value: "hello world", isEnabled: true),
+            ManagedVariable(name: "QUOTED", value: "a'b", isEnabled: true),
+            ManagedVariable(name: "DISABLED", value: "disabled-secret")
         ]
-        let paths = [
-            PathEntry(path: "/first/bin"),
-            PathEntry(path: "/second/bin")
-        ]
-        let rendered = ShellConfiguration.renderEnvironmentFile(variables: variables, pathEntries: paths)
+        let rendered = ShellConfiguration.renderEnvironmentFile(variables: variables)
+        expect(!rendered.contains("disabled-secret"), "disabled values are omitted from the shell file")
 
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("MacEnvManagerTests-\(UUID().uuidString)", isDirectory: true)
@@ -46,7 +44,7 @@ struct CoreTests {
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = [
             "-c",
-            "PATH=/usr/bin; source \"$1\"; printf '%s\\n%s\\n%s' \"$PLAIN\" \"$QUOTED\" \"$PATH\"",
+            "PATH=/usr/bin; export DISABLED=stale; source \"$1\"; printf '%s\\n%s\\n%s\\n%s' \"$PLAIN\" \"$QUOTED\" \"$PATH\" \"${DISABLED+x}\"",
             "test",
             file.path
         ]
@@ -55,7 +53,7 @@ struct CoreTests {
         process.waitUntilExit()
         let result = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         expect(process.terminationStatus == 0, "rendered file is valid zsh")
-        expect(result == "hello world\na'b\n/first/bin:/second/bin:/usr/bin", "values and PATH order survive sourcing")
+        expect(result == "hello world\na'b\n/usr/bin\n", "enabled values load, disabled inheritance clears, PATH is preserved")
     }
 
     private static func testManagedProfileBlock() throws {
@@ -81,20 +79,17 @@ struct CoreTests {
         }
     }
 
-    private static func testPathNormalization() throws {
-        let home = URL(fileURLWithPath: "/Users/example")
-        let expanded = try ShellConfiguration.normalizePath("~/bin", home: home)
-        expect(
-            expanded == "/Users/example/bin",
-            "tilde path expands"
-        )
-
-        do {
-            _ = try ShellConfiguration.normalizePath("/bad:path", home: home)
-            expect(false, "colon path must throw")
-        } catch EnvironmentManagerError.invalidPath {
-            expect(true, "colon path is rejected")
-        }
+    private static func testVariableDefaultsAndCoding() throws {
+        let variable = ManagedVariable(name: "NEW_TEST", value: "saved")
+        expect(!variable.isEnabled, "new variables default to disabled")
+        let encoded = try JSONEncoder().encode(variable)
+        let decoded = try JSONDecoder().decode(ManagedVariable.self, from: encoded)
+        expect(decoded == variable && !decoded.isEnabled, "disabled state survives encoding and decoding")
+        let legacy = """
+        {"id":"\(UUID().uuidString)","name":"LEGACY_TEST","value":"legacy"}
+        """
+        let migrated = try JSONDecoder().decode(ManagedVariable.self, from: Data(legacy.utf8))
+        expect(migrated.isEnabled, "legacy variables remain enabled")
     }
 
     private static func testConflictDetection() {

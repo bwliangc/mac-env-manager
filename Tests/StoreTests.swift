@@ -48,6 +48,9 @@ struct StoreTests {
     static func main() throws {
         try testAllShellPersistence()
         try testSevenShellFamilies()
+        try testEnableCheckboxLifecycle()
+        try testEnableCheckboxRollback()
+        try testPathRemovalMigration()
         try testCustomPOSIXStartupAndRepair()
         try testRenameRemovalAndStartupSync()
         try testLaunchctlFailureDoesNotPersist()
@@ -69,7 +72,7 @@ struct StoreTests {
 
         let launchctl = FakeLaunchctlClient()
         let store = EnvironmentStore(home: root, launchctl: launchctl)
-        try store.upsertVariable(id: nil, name: "STORE_TEST", value: "hello world")
+        try store.upsertVariable(id: nil, name: "STORE_TEST", value: "hello world", isEnabled: true)
         expect(launchctl.values["STORE_TEST"] == "hello world", "new variable reaches the GUI session")
 
         let appSupport = root
@@ -108,26 +111,6 @@ struct StoreTests {
             "login Bash loads managed variable"
         )
 
-        let bin = root.appendingPathComponent("tools/bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-        try store.addPath(bin.path)
-        let zshPath = try shellValue(
-            executable: "/bin/zsh",
-            arguments: ["-ic"],
-            home: root,
-            expression: "$PATH",
-            initialPath: "/usr/bin:/bin"
-        )
-        let bashPath = try shellValue(
-            executable: "/bin/bash",
-            arguments: ["-ic"],
-            home: root,
-            expression: "$PATH",
-            initialPath: "/usr/bin:/bin"
-        )
-        expect(zshPath.hasPrefix(bin.path + ":"), "Zsh receives managed PATH")
-        expect(bashPath.hasPrefix(bin.path + ":"), "Bash receives managed PATH")
-
         let variableID = try required(store.variables.first?.id, "saved variable has an id")
         try store.upsertVariable(id: variableID, name: "STORE_TEST", value: "updated")
         expect(launchctl.values["STORE_TEST"] == "updated", "updated value reaches the GUI session")
@@ -144,7 +127,7 @@ struct StoreTests {
 
         let firstLaunchctl = FakeLaunchctlClient()
         let store = EnvironmentStore(home: root, launchctl: firstLaunchctl)
-        try store.upsertVariable(id: nil, name: "ORIGINAL_NAME", value: "managed")
+        try store.upsertVariable(id: nil, name: "ORIGINAL_NAME", value: "managed", isEnabled: true)
         let variableID = try required(store.variables.first?.id, "lifecycle variable has an id")
 
         firstLaunchctl.values["RENAMED_VALUE"] = "external"
@@ -155,7 +138,7 @@ struct StoreTests {
         try store.removeVariable(id: variableID)
         expect(firstLaunchctl.values["RENAMED_VALUE"] == nil, "delete removes the GUI variable")
 
-        try store.upsertVariable(id: nil, name: "STARTUP_SYNC", value: "restored")
+        try store.upsertVariable(id: nil, name: "STARTUP_SYNC", value: "restored", isEnabled: true)
         let secondLaunchctl = FakeLaunchctlClient()
         let reloadedStore = EnvironmentStore(home: root, launchctl: secondLaunchctl)
         expect(reloadedStore.variables.contains(where: { $0.name == "STARTUP_SYNC" }), "saved variable reloads")
@@ -172,12 +155,8 @@ struct StoreTests {
         let launchctl = FakeLaunchctlClient()
         let store = EnvironmentStore(home: root, launchctl: launchctl)
         let specialValue = "  中文 a'b\" $HOME `uname` \\ !history ; $(uname) * [x]\t  "
-        try store.upsertVariable(id: nil, name: "ALL_SHELL_TEST", value: specialValue)
-        try store.upsertVariable(id: nil, name: "EMPTY_TEST", value: "")
-        let firstPath = root.appendingPathComponent("tools with spaces/[x]!/bin").path
-        let secondPath = root.appendingPathComponent("second/bin").path
-        try store.addPath(firstPath)
-        try store.addPath(secondPath)
+        try store.upsertVariable(id: nil, name: "ALL_SHELL_TEST", value: specialValue, isEnabled: true)
+        try store.upsertVariable(id: nil, name: "EMPTY_TEST", value: "", isEnabled: true)
 
         let executables = ["/bin/bash", "/opt/homebrew/bin/bash", "/bin/zsh", "/bin/sh", "/bin/dash", "/bin/ksh", "/bin/csh", "/bin/tcsh"]
         let posixENV = try required(launchctl.values["ENV"], "GUI session receives the POSIX startup bridge")
@@ -188,9 +167,6 @@ struct StoreTests {
                 let bridge = arguments == ["-ic"] ? ["ENV": posixENV] : [:]
                 let value = try shellValue(executable: executable, arguments: arguments, home: root, expression: "$ALL_SHELL_TEST", additionalEnvironment: bridge)
                 expect(value == specialValue, "\(executable) \(arguments) preserves special characters")
-                let path = try shellValue(executable: executable, arguments: arguments, home: root, expression: "$PATH", additionalEnvironment: bridge)
-                expect(path.hasPrefix(firstPath + ":" + secondPath + ":"), "\(executable) \(arguments) preserves PATH order and spaces")
-                expect(path.components(separatedBy: ":").filter { $0 == firstPath }.count == 1, "\(executable) \(arguments) does not duplicate PATH")
                 let empty = try shellValue(executable: executable, arguments: arguments, home: root, expression: "$EMPTY_TEST", additionalEnvironment: bridge)
                 expect(empty.isEmpty, "\(executable) \(arguments) preserves an empty value")
             }
@@ -226,7 +202,7 @@ struct StoreTests {
         try "export CUSTOM_STARTUP=preserved\nexport MANAGED_TEST=stale\n".write(to: customENV, atomically: true, encoding: .utf8)
         let launchctl = FakeLaunchctlClient(values: ["ENV": customENV.path])
         let store = EnvironmentStore(home: root, launchctl: launchctl)
-        try store.upsertVariable(id: nil, name: "MANAGED_TEST", value: "managed")
+        try store.upsertVariable(id: nil, name: "MANAGED_TEST", value: "managed", isEnabled: true)
         let bridge = [
             "ENV": try required(launchctl.values["ENV"], "custom ENV gets a bridge"),
             "_MAC_ENV_MANAGER_ORIGINAL_ENV": customENV.path
@@ -244,13 +220,136 @@ struct StoreTests {
         expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(".tcshrc").path), "absence of .tcshrc preserves .cshrc loading")
     }
 
+    private static func testEnableCheckboxLifecycle() throws {
+        let root = temporaryHome(named: "Checkbox")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let launchctl = FakeLaunchctlClient(values: ["CHECKBOX_TEST": "inherited-old"])
+        let store = EnvironmentStore(home: root, launchctl: launchctl)
+        try store.upsertVariable(id: nil, name: "CHECKBOX_TEST", value: "kept-secret")
+        let id = try required(store.variables.first?.id, "checkbox variable has an id")
+        expect(store.variables.first?.isEnabled == false, "new variable is saved unchecked")
+        expect(launchctl.values["CHECKBOX_TEST"] == nil, "unchecked save clears the GUI variable")
+        let support = root.appendingPathComponent("Library/Application Support/MacEnvManager")
+        let executables = ["/bin/bash", "/opt/homebrew/bin/bash", "/bin/zsh", "/bin/sh", "/bin/dash", "/bin/ksh", "/bin/csh", "/bin/tcsh"]
+        for enabled in [false, true, false, true] {
+            try store.setVariableEnabled(id: id, isEnabled: enabled)
+            expect(store.variables.first?.value == "kept-secret", "checkbox preserves the saved value")
+            expect(store.variables.first?.isEnabled == enabled, "checkbox persists its state")
+            expect(launchctl.values["CHECKBOX_TEST"] == (enabled ? "kept-secret" : nil), "checkbox updates GUI state")
+            for executable in executables where FileManager.default.isExecutableFile(atPath: executable) {
+                let modes = executable.hasSuffix("csh") ? [["-c"], ["-l"]] : [["-ic"], ["-lic"]]
+                for arguments in modes {
+                    let value = try shellValue(
+                        executable: executable, arguments: arguments, home: root, expression: "",
+                        additionalEnvironment: ["ENV": support.appendingPathComponent("posix-init.sh").path, "CHECKBOX_TEST": "inherited-old"],
+                        script: "/usr/bin/printenv CHECKBOX_TEST; /usr/bin/true"
+                    )
+                    expect(value == (enabled ? "kept-secret\n" : ""), "\(executable) \(arguments) honors checkbox and clears inherited values")
+                }
+            }
+        }
+        try store.setVariableEnabled(id: id, isEnabled: false)
+        try store.upsertVariable(id: id, name: "CHECKBOX_TEST", value: "edited-disabled-value")
+        expect(store.variables.first?.isEnabled == false, "editing does not automatically enable a disabled variable")
+        for filename in ["environment.zsh", "environment.csh"] {
+            let text = try String(contentsOf: support.appendingPathComponent(filename))
+            expect(!text.contains("edited-disabled-value") && !text.contains(Data("edited-disabled-value".utf8).base64EncodedString()), "\(filename) omits disabled values")
+        }
+        let freshLaunchctl = FakeLaunchctlClient(values: ["CHECKBOX_TEST": "stale-after-relaunch"])
+        let reloaded = EnvironmentStore(home: root, launchctl: freshLaunchctl)
+        expect(reloaded.variables.first?.isEnabled == false && reloaded.variables.first?.value == "edited-disabled-value", "relaunch retains disabled variable and its value")
+        expect(freshLaunchctl.values["CHECKBOX_TEST"] == nil, "relaunch removes disabled GUI variables")
+        try reloaded.upsertVariable(id: id, name: "DISABLED_RENAMED", value: "renamed-disabled")
+        expect(reloaded.variables.first?.isEnabled == false, "renaming keeps a variable unchecked")
+        expect(freshLaunchctl.values["CHECKBOX_TEST"] == nil && freshLaunchctl.values["DISABLED_RENAMED"] == nil, "disabled rename sets neither GUI name")
+        try reloaded.removeVariable(id: id)
+        expect(reloaded.variables.isEmpty, "disabled variables can be deleted")
+    }
+
+    private static func testEnableCheckboxRollback() throws {
+        let root = temporaryHome(named: "CheckboxRollback")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fileManager = FailingFileManager()
+        let launchctl = FakeLaunchctlClient()
+        let store = EnvironmentStore(home: root, launchctl: launchctl, fileManager: fileManager)
+        try store.upsertVariable(id: nil, name: "CHECKBOX_ROLLBACK", value: "saved", isEnabled: true)
+        let id = try required(store.variables.first?.id, "rollback checkbox has an id")
+        let support = root.appendingPathComponent("Library/Application Support/MacEnvManager")
+        let filenames = ["state.json", "environment.zsh", "environment.csh"]
+        let before = try filenames.map { try Data(contentsOf: support.appendingPathComponent($0)) }
+        fileManager.failingFilename = "environment.csh"
+        do {
+            try store.setVariableEnabled(id: id, isEnabled: false)
+            expect(false, "partial write must reject checkbox change")
+        } catch EnvironmentManagerError.storage {
+            expect(true, "partial write rejects checkbox change")
+        }
+        expect(store.variables.first?.isEnabled == true, "failed disable restores the checked state")
+        expect(launchctl.values["CHECKBOX_ROLLBACK"] == "saved", "failed disable restores the GUI value")
+        for (index, filename) in filenames.enumerated() {
+            try expect(Data(contentsOf: support.appendingPathComponent(filename)) == before[index], "failed disable restores \(filename)")
+        }
+        launchctl.failingUnsets.insert("CHECKBOX_ROLLBACK")
+        do {
+            try store.setVariableEnabled(id: id, isEnabled: false)
+            expect(false, "unsetenv failure must reject disable")
+        } catch EnvironmentManagerError.launchctl {
+            expect(true, "unsetenv failure rejects disable")
+        }
+        expect(store.variables.first?.isEnabled == true, "unsetenv failure leaves checkbox checked")
+        launchctl.failingUnsets.removeAll()
+        try store.setVariableEnabled(id: id, isEnabled: false)
+        launchctl.failingSets.insert("CHECKBOX_ROLLBACK")
+        do {
+            try store.setVariableEnabled(id: id, isEnabled: true)
+            expect(false, "setenv failure must reject enable")
+        } catch EnvironmentManagerError.launchctl {
+            expect(true, "setenv failure rejects enable")
+        }
+        expect(store.variables.first?.isEnabled == false, "setenv failure leaves checkbox unchecked")
+        expect(launchctl.values["CHECKBOX_ROLLBACK"] == nil, "setenv failure keeps GUI variable absent")
+    }
+
+    private static func testPathRemovalMigration() throws {
+        let root = temporaryHome(named: "RemovePath")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let support = root.appendingPathComponent("Library/Application Support/MacEnvManager")
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        let legacyJSON = """
+        {"version":5,"variables":[{"id":"\(UUID().uuidString)","name":"LEGACY_ENABLED","value":"legacy"}],"pathEntries":[{"id":"\(UUID().uuidString)","path":"/retired-managed/bin"}]}
+        """
+        try Data(legacyJSON.utf8).write(to: support.appendingPathComponent("state.json"))
+        try "export PATH='/retired-managed/bin:/usr/bin'\n".write(to: support.appendingPathComponent("environment.zsh"), atomically: true, encoding: .utf8)
+        try "setenv PATH '/retired-managed/bin:/usr/bin'\n".write(to: support.appendingPathComponent("environment.csh"), atomically: true, encoding: .utf8)
+        let launchctl = FakeLaunchctlClient()
+        let store = EnvironmentStore(home: root, launchctl: launchctl)
+        expect(store.errorMessage == nil, "version 5 state migrates without PATH management")
+        expect(store.variables.first?.isEnabled == true, "legacy variable remains checked")
+        expect(launchctl.values["LEGACY_ENABLED"] == "legacy", "legacy checked variable remains active in GUI")
+        let newJSON = try String(contentsOf: support.appendingPathComponent("state.json"))
+        expect(!newJSON.contains("pathEntries") && newJSON.contains("isEnabled"), "state format drops PATH and saves checkbox state")
+        for filename in ["environment.zsh", "environment.csh"] {
+            let text = try String(contentsOf: support.appendingPathComponent(filename))
+            expect(!text.contains("/retired-managed/bin") && !text.contains("PATH="), "migration removes PATH injection from \(filename)")
+        }
+        let backedUpState = store.backups.filter { $0.name.hasSuffix("state.json.bak") }
+        expect(backedUpState.contains { (try? String(contentsOf: $0.url)) == legacyJSON }, "old PATH configuration remains recoverable in backup")
+        let initialPath = "/custom/bin:/usr/bin:/bin"
+        let posixPath = try shellValue(executable: "/bin/sh", arguments: ["-c"], home: root, expression: "", initialPath: initialPath,
+            script: ". \"$HOME/Library/Application Support/MacEnvManager/environment.zsh\"; /usr/bin/printf '%s' \"$PATH\"")
+        expect(posixPath == initialPath, "POSIX loader preserves the user's PATH")
+        let cshPath = try shellValue(executable: "/bin/tcsh", arguments: ["-f", "-c"], home: root, expression: "", initialPath: initialPath,
+            script: "source \"$HOME/Library/Application Support/MacEnvManager/environment.csh\"; /usr/bin/printf '%s' \"$PATH\"")
+        expect(cshPath == initialPath, "C-shell loader preserves the user's PATH")
+    }
+
     private static func testPartialWriteRollback() throws {
         let root = temporaryHome(named: "PartialWrite")
         defer { try? FileManager.default.removeItem(at: root) }
         let fileManager = FailingFileManager()
         let launchctl = FakeLaunchctlClient()
         let store = EnvironmentStore(home: root, launchctl: launchctl, fileManager: fileManager)
-        try store.upsertVariable(id: nil, name: "PARTIAL_OLD", value: "original")
+        try store.upsertVariable(id: nil, name: "PARTIAL_OLD", value: "original", isEnabled: true)
         let id = try required(store.variables.first?.id, "partial write variable has an id")
         let support = root.appendingPathComponent("Library/Application Support/MacEnvManager")
         let filenames = ["state.json", "environment.zsh", "environment.csh", "posix-init.sh"]
@@ -282,7 +381,7 @@ struct StoreTests {
 
         let launchctl = FakeLaunchctlClient()
         let store = EnvironmentStore(home: root, launchctl: launchctl)
-        try store.upsertVariable(id: nil, name: "ROLLBACK_OLD", value: "original")
+        try store.upsertVariable(id: nil, name: "ROLLBACK_OLD", value: "original", isEnabled: true)
         let variableID = try required(store.variables.first?.id, "rollback variable has an id")
 
         try "keep=1\n\(ShellConfiguration.markerStart)\n".write(
@@ -319,14 +418,14 @@ struct StoreTests {
         let store = EnvironmentStore(home: root, launchctl: launchctl)
 
         do {
-            try store.upsertVariable(id: nil, name: "SET_FAILURE", value: "value")
+            try store.upsertVariable(id: nil, name: "SET_FAILURE", value: "value", isEnabled: true)
             expect(false, "setenv failure must reject a new variable")
         } catch EnvironmentManagerError.launchctl {
             expect(true, "setenv failure rejects a new variable")
         }
         expect(store.variables.isEmpty, "setenv failure leaves state unchanged")
 
-        try store.upsertVariable(id: nil, name: "UNSET_FAILURE", value: "value")
+        try store.upsertVariable(id: nil, name: "UNSET_FAILURE", value: "value", isEnabled: true)
         let variableID = try required(store.variables.first?.id, "unset failure variable has an id")
         launchctl.failingUnsets.insert("UNSET_FAILURE")
         do {
@@ -444,13 +543,14 @@ struct StoreTests {
         home: URL,
         expression: String,
         initialPath: String = "/usr/bin:/bin",
-        additionalEnvironment: [String: String] = [:]
+        additionalEnvironment: [String: String] = [:],
+        script: String? = nil
     ) throws -> String {
         let process = Process()
         let output = Pipe()
         let error = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
-        let command = "/usr/bin/printf '%s' \"\(expression)\""
+        let command = script ?? "/usr/bin/printf '%s' \"\(expression)\""
         if arguments == ["-l"] {
             // Login argv[0] with -c exercises .login without forcing job control
             // in a test process with no tty (tcsh -l emits warnings on stdout).

@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 
 struct VariableEditorContext: Identifiable {
@@ -13,10 +12,11 @@ struct VariableEditorSheet: View {
     let title: String
     let initialName: String
     let initialValue: String
-    let onSave: (String, String) throws -> Void
+    let onSave: (String, String, Bool) throws -> Void
 
     @State private var name: String
     @State private var value: String
+    @State private var isEnabled: Bool
     @State private var revealsValue = false
     @State private var errorMessage: String?
 
@@ -29,7 +29,8 @@ struct VariableEditorSheet: View {
         title: String,
         initialName: String = "",
         initialValue: String = "",
-        onSave: @escaping (String, String) throws -> Void
+        initialIsEnabled: Bool = false,
+        onSave: @escaping (String, String, Bool) throws -> Void
     ) {
         self.title = title
         self.initialName = initialName
@@ -37,6 +38,7 @@ struct VariableEditorSheet: View {
         self.onSave = onSave
         _name = State(initialValue: initialName)
         _value = State(initialValue: initialValue)
+        _isEnabled = State(initialValue: initialIsEnabled)
     }
 
     private var looksSensitive: Bool {
@@ -84,6 +86,10 @@ struct VariableEditorSheet: View {
                     .help(revealsValue ? "隐藏变量值" : "显示变量值")
                 }
 
+                Toggle("启用此变量", isOn: $isEnabled)
+                    .toggleStyle(.checkbox)
+                    .help("勾选后同步启用；取消勾选仅保存变量")
+
                 if looksSensitive {
                     Label("该值会以仅当前用户可读的明文保存", systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
@@ -112,7 +118,7 @@ struct VariableEditorSheet: View {
             }
             .padding(16)
         }
-        .frame(width: 460, height: looksSensitive ? 310 : 280)
+        .frame(width: 460, height: looksSensitive ? 350 : 320)
         .onAppear {
             focusedField = .name
         }
@@ -120,91 +126,7 @@ struct VariableEditorSheet: View {
 
     private func save() {
         do {
-            try onSave(name, value)
-            dismiss()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-}
-
-struct PathEditorSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @FocusState private var isFocused: Bool
-
-    let onSave: (String) throws -> Void
-
-    @State private var path = ""
-    @State private var errorMessage: String?
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("添加 PATH 条目")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-            }
-            .padding(20)
-
-            Divider()
-
-            Form {
-                HStack(spacing: 8) {
-                    TextField("/opt/example/bin", text: $path)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
-                        .focused($isFocused)
-
-                    Button {
-                        chooseDirectory()
-                    } label: {
-                        Image(systemName: "folder")
-                            .frame(width: 18, height: 18)
-                    }
-                    .help("选择文件夹")
-                }
-
-                if let errorMessage {
-                    Text(errorMessage)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .formStyle(.grouped)
-            .padding(.horizontal, 4)
-
-            Divider()
-
-            HStack {
-                Spacer()
-                Button("取消") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button("添加") { save() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            .padding(16)
-        }
-        .frame(width: 500, height: 230)
-        .onAppear { isFocused = true }
-    }
-
-    private func chooseDirectory() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = true
-        panel.prompt = "选择"
-        if panel.runModal() == .OK, let url = panel.url {
-            path = url.path
-        }
-    }
-
-    private func save() {
-        do {
-            try onSave(path)
+            try onSave(name, value, isEnabled)
             dismiss()
         } catch {
             errorMessage = error.localizedDescription

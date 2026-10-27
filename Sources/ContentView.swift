@@ -2,24 +2,10 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var store: EnvironmentStore
-    @State private var selectedSection: AppSection? = .variables
 
     var body: some View {
         VStack(spacing: 0) {
-            NavigationSplitView {
-                List(AppSection.allCases, selection: $selectedSection) { section in
-                    Label(section.title, systemImage: section.systemImage)
-                        .tag(section)
-                }
-                .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 230)
-            } detail: {
-                switch selectedSection ?? .variables {
-                case .variables:
-                    EnvironmentVariablesView()
-                case .path:
-                    PathEntriesView()
-                }
-            }
+            EnvironmentVariablesView()
 
             Divider()
             StatusBar()
@@ -123,7 +109,7 @@ struct EnvironmentVariablesView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            DetailHeader(title: "环境变量", subtitle: "7 种 Shell 与当前 GUI 会话 · 自动同步") {
+            DetailHeader(title: "环境变量", subtitle: "勾选启用 · 同步到 7 种 Shell 与当前 GUI 会话") {
                 HStack(spacing: 10) {
                     IconButton(
                         systemImage: revealsValues ? "eye.slash" : "eye",
@@ -146,14 +132,30 @@ struct EnvironmentVariablesView: View {
             }
 
             Divider()
-            columnHeader(name: "变量名", value: "变量值")
+            columnHeader()
             Divider()
 
             ZStack {
                 List(store.variables, selection: $selectedID) { variable in
                     HStack(spacing: 16) {
+                        Toggle("启用", isOn: Binding(
+                            get: { variable.isEnabled },
+                            set: { isEnabled in
+                                do {
+                                    try store.setVariableEnabled(id: variable.id, isEnabled: isEnabled)
+                                } catch {
+                                    store.present(error)
+                                }
+                            }
+                        ))
+                        .toggleStyle(.checkbox)
+                        .labelsHidden()
+                        .accessibilityLabel("启用 \(variable.name)")
+                        .help(variable.isEnabled ? "取消勾选以停用，保留变量" : "勾选以启用变量")
+                        .frame(width: 50)
                         Text(variable.name)
                             .font(.system(.body, design: .monospaced).weight(.medium))
+                            .foregroundStyle(variable.isEnabled ? .primary : .secondary)
                             .frame(width: 230, alignment: .leading)
                         Text(revealsValues ? variable.value : maskedValue(variable.value))
                             .font(.system(.body, design: .monospaced))
@@ -166,6 +168,13 @@ struct EnvironmentVariablesView: View {
                     .tag(variable.id)
                     .contextMenu {
                         Button("编辑") { editor = VariableEditorContext(variable: variable) }
+                        Button(variable.isEnabled ? "停用" : "启用") {
+                            do {
+                                try store.setVariableEnabled(id: variable.id, isEnabled: !variable.isEnabled)
+                            } catch {
+                                store.present(error)
+                            }
+                        }
                         Button("删除", role: .destructive) {
                             selectedID = variable.id
                             confirmsDelete = true
@@ -187,9 +196,10 @@ struct EnvironmentVariablesView: View {
             VariableEditorSheet(
                 title: context.variable == nil ? "添加环境变量" : "编辑环境变量",
                 initialName: context.variable?.name ?? "",
-                initialValue: context.variable?.value ?? ""
-            ) { name, value in
-                try store.upsertVariable(id: context.variable?.id, name: name, value: value)
+                initialValue: context.variable?.value ?? "",
+                initialIsEnabled: context.variable?.isEnabled ?? false
+            ) { name, value, isEnabled in
+                try store.upsertVariable(id: context.variable?.id, name: name, value: value, isEnabled: isEnabled)
             }
         }
         .confirmationDialog("删除所选变量？", isPresented: $confirmsDelete) {
@@ -212,118 +222,13 @@ struct EnvironmentVariablesView: View {
     }
 }
 
-struct PathEntriesView: View {
-    @EnvironmentObject private var store: EnvironmentStore
-    @State private var selectedID: UUID?
-    @State private var showsEditor = false
-    @State private var confirmsDelete = false
-
-    private var selectedIndex: Int? {
-        guard let selectedID else { return nil }
-        return store.pathEntries.firstIndex { $0.id == selectedID }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            DetailHeader(title: "PATH", subtitle: "7 种 Shell · 优先级从上到下") {
-                HStack(spacing: 10) {
-                    IconButton(systemImage: "plus", help: "添加目录") { showsEditor = true }
-                    IconButton(
-                        systemImage: "arrow.up",
-                        help: "提高优先级",
-                        disabled: selectedIndex == nil || selectedIndex == 0
-                    ) {
-                        moveSelected(by: -1)
-                    }
-                    IconButton(
-                        systemImage: "arrow.down",
-                        help: "降低优先级",
-                        disabled: selectedIndex == nil || selectedIndex == store.pathEntries.count - 1
-                    ) {
-                        moveSelected(by: 1)
-                    }
-                    IconButton(systemImage: "trash", help: "删除目录", disabled: selectedID == nil) {
-                        confirmsDelete = true
-                    }
-                }
-            }
-
-            Divider()
-            columnHeader(name: "目录", value: "状态")
-            Divider()
-
-            ZStack {
-                List(store.pathEntries, selection: $selectedID) { entry in
-                    HStack(spacing: 16) {
-                        Text(entry.path)
-                            .font(.system(.body, design: .monospaced))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer(minLength: 12)
-                        if FileManager.default.fileExists(atPath: entry.path) {
-                            Label("可用", systemImage: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
-                        } else {
-                            Label("未找到", systemImage: "exclamationmark.circle.fill")
-                                .foregroundStyle(.orange)
-                        }
-                    }
-                    .font(.caption)
-                    .contentShape(Rectangle())
-                    .tag(entry.id)
-                    .contextMenu {
-                        Button("删除", role: .destructive) {
-                            selectedID = entry.id
-                            confirmsDelete = true
-                        }
-                    }
-                }
-                .listStyle(.inset)
-
-                if store.pathEntries.isEmpty {
-                    EmptyListState(title: "暂无 PATH 条目", systemImage: "point.3.connected.trianglepath.dotted")
-                }
-            }
-        }
-        .sheet(isPresented: $showsEditor) {
-            PathEditorSheet { path in
-                try store.addPath(path)
-            }
-        }
-        .confirmationDialog("删除所选 PATH 条目？", isPresented: $confirmsDelete) {
-            Button("删除", role: .destructive) {
-                guard let id = selectedID else { return }
-                do {
-                    try store.removePath(id: id)
-                    selectedID = nil
-                } catch {
-                    store.present(error)
-                }
-            }
-            Button("取消", role: .cancel) {}
-        }
-        .onChange(of: store.pathEntries) { entries in
-            if let selectedID, !entries.contains(where: { $0.id == selectedID }) {
-                self.selectedID = nil
-            }
-        }
-    }
-
-    private func moveSelected(by offset: Int) {
-        guard let selectedID else { return }
-        do {
-            try store.movePath(id: selectedID, offset: offset)
-        } catch {
-            store.present(error)
-        }
-    }
-}
-
-private func columnHeader(name: String, value: String) -> some View {
+private func columnHeader() -> some View {
     HStack(spacing: 16) {
-        Text(name)
+        Text("启用")
+            .frame(width: 50)
+        Text("变量名")
             .frame(width: 230, alignment: .leading)
-        Text(value)
+        Text("变量值")
         Spacer()
     }
     .font(.caption.weight(.medium))

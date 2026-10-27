@@ -1,76 +1,56 @@
 import Foundation
 
-enum AppSection: String, CaseIterable, Identifiable {
-    case variables
-    case path
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .variables: return "环境变量"
-        case .path: return "PATH"
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .variables: return "terminal"
-        case .path: return "point.3.connected.trianglepath.dotted"
-        }
-    }
-}
-
 struct ManagedVariable: Codable, Identifiable, Equatable {
     var id: UUID
     var name: String
     var value: String
+    var isEnabled: Bool
 
-    init(id: UUID = UUID(), name: String, value: String) {
+    init(id: UUID = UUID(), name: String, value: String, isEnabled: Bool = false) {
         self.id = id
         self.name = name
         self.value = value
+        self.isEnabled = isEnabled
     }
-}
 
-struct PathEntry: Codable, Identifiable, Equatable {
-    var id: UUID
-    var path: String
+    private enum CodingKeys: String, CodingKey {
+        case id, name, value, isEnabled
+    }
 
-    init(id: UUID = UUID(), path: String) {
-        self.id = id
-        self.path = path
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        value = try container.decode(String.self, forKey: .value)
+        // All variables in older releases were active; preserve that behavior.
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
     }
 }
 
 struct StoredState: Codable, Equatable {
-    static let currentVersion = 5
+    static let currentVersion = 6
 
     var version: Int
     var variables: [ManagedVariable]
-    var pathEntries: [PathEntry]
     var legacySessionNames: [String]
 
     static let empty = StoredState(
         version: currentVersion,
         variables: [],
-        pathEntries: [],
         legacySessionNames: []
     )
 
     private enum CodingKeys: String, CodingKey {
-        case version, variables, pathEntries, sessionNames
+        case version, variables, sessionNames
     }
 
     init(
         version: Int,
         variables: [ManagedVariable],
-        pathEntries: [PathEntry],
         legacySessionNames: [String] = []
     ) {
         self.version = version
         self.variables = variables
-        self.pathEntries = pathEntries
         self.legacySessionNames = legacySessionNames
     }
 
@@ -78,7 +58,6 @@ struct StoredState: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
         variables = try container.decodeIfPresent([ManagedVariable].self, forKey: .variables) ?? []
-        pathEntries = try container.decodeIfPresent([PathEntry].self, forKey: .pathEntries) ?? []
         legacySessionNames = try container.decodeIfPresent([String].self, forKey: .sessionNames) ?? []
     }
 
@@ -86,7 +65,6 @@ struct StoredState: Codable, Equatable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(version, forKey: .version)
         try container.encode(variables, forKey: .variables)
-        try container.encode(pathEntries, forKey: .pathEntries)
     }
 }
 
@@ -104,8 +82,6 @@ enum EnvironmentManagerError: LocalizedError {
     case protectedName(String)
     case duplicateName(String)
     case invalidValue
-    case invalidPath
-    case duplicatePath(String)
     case malformedProfile(String)
     case launchctl(String)
     case storage(String)
@@ -120,10 +96,6 @@ enum EnvironmentManagerError: LocalizedError {
             return "变量 \(name) 已存在。"
         case .invalidValue:
             return "变量值不能包含换行符或空字符。"
-        case .invalidPath:
-            return "PATH 条目不能为空，也不能包含冒号、换行符或空字符。"
-        case .duplicatePath(let path):
-            return "PATH 中已包含 \(path)。"
         case .malformedProfile(let file):
             return "\(file) 中的受管区块不完整，已停止写入以保护原文件。"
         case .launchctl(let detail):
